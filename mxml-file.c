@@ -50,6 +50,15 @@ typedef struct _mxml_fdbuf_s		/**** File descriptor buffer ****/
 		buffer[8192];		/* Character buffer */
 } _mxml_fdbuf_t;
 
+typedef struct _mxml_streambuf_s		/**** File descriptor buffer ****/
+{
+  void * ctxt;			/* File descriptor */
+  mxml_read_stream_cb_t read;
+  mxml_write_stream_cb_t write;
+  unsigned char	*current,		/* Current position in buffer */
+		*end,			/* End of buffer */
+		buffer[8192];		/* Character buffer */
+} _mxml_streambuf_t;
 
 /*
  * Local functions...
@@ -60,6 +69,10 @@ static int		mxml_fd_getc(void *p, int *encoding);
 static int		mxml_fd_putc(int ch, void *p);
 static int		mxml_fd_read(_mxml_fdbuf_t *buf);
 static int		mxml_fd_write(_mxml_fdbuf_t *buf);
+static int		mxml_stream_getc(void *p, int *encoding);
+static int		mxml_stream_putc(int ch, void *p);
+static int		mxml_stream_read(_mxml_streambuf_t *buf);
+static int		mxml_stream_write(_mxml_streambuf_t *buf);
 static int		mxml_file_getc(void *p, int *encoding);
 static int		mxml_file_putc(int ch, void *p);
 static int		mxml_get_entity(mxml_node_t *parent, void *p, int *encoding, _mxml_getc_cb_t getc_cb, int *line);
@@ -181,6 +194,47 @@ mxmlLoadString(mxml_node_t    *top,	/* I - Top node */
                          NULL));
 }
 
+/*
+ * 'mxmlLoadStream()' - Load a stream into an XML node tree.
+ *
+ * The nodes in the specified stream are added to the specified top node.
+ * If no top node is provided, the XML file MUST be well-formed with a
+ * single parent node like <?xml> for the entire file. The callback
+ * function returns the value type that should be used for child nodes.
+ * The constants @code MXML_INTEGER_CALLBACK@, @code MXML_OPAQUE_CALLBACK@,
+ * @code MXML_REAL_CALLBACK@, and @code MXML_TEXT_CALLBACK@ are defined for
+ * loading child (data) nodes of the specified type.
+ *
+ * Note: The most common programming error when using the Mini-XML library is
+ * to load an XML file using the @code MXML_TEXT_CALLBACK@, which returns inline
+ * text as a series of whitespace-delimited words, instead of using the
+ * @code MXML_OPAQUE_CALLBACK@ which returns the inline text as a single string
+ * (including whitespace).
+ */
+
+mxml_node_t *				/* O - First node or @code NULL@ if the file could not be read. */
+mxmlLoadStream(mxml_node_t    *top,	/* I - Top node */
+             mxml_read_stream_cb_t read_stream_cb, 	/* I - Stream callback */
+			 void *read_stream_context,	/* I - Stream context */
+             mxml_load_cb_t cb)		/* I - Callback function or constant */
+{
+  _mxml_streambuf_t	buf;			/* stream buffer */
+
+
+ /*
+  * Initialize the stream buffer...
+  */
+
+  buf.ctxt    = read_stream_context;
+  buf.read    = read_stream_cb;
+  buf.current = buf.buffer;
+  buf.end     = buf.buffer;
+ /*
+  * Read the XML data...
+  */
+
+  return (mxml_load_data(top, &buf, cb, mxml_stream_getc, MXML_NO_CALLBACK, NULL));
+}
 
 /*
  * 'mxmlSaveAllocString()' - Save an XML tree to an allocated string.
@@ -331,6 +385,54 @@ mxmlSaveFile(mxml_node_t    *node,	/* I - Node to write */
   return (0);
 }
 
+/*
+ * 'mxmlSaveStream()' - Save an XML tree to a stream.
+ *
+ * The callback argument specifies a function that returns a whitespace
+ * string or NULL before and after each element. If @code MXML_NO_CALLBACK@
+ * is specified, whitespace will only be added before @code MXML_TEXT@ nodes
+ * with leading whitespace and before attribute names inside opening
+ * element tags.
+ */
+
+ int					/* O - 0 on success, -1 on error. */
+mxmlSaveStream(mxml_node_t    *node,	/* I - Node to write */
+             mxml_write_stream_cb_t write_stream_cb, 	/* I - Stream callback */
+			 void *write_stream_context,	/* I - Stream context */
+	   mxml_save_cb_t cb)		/* I - Whitespace callback or @code MXML_NO_CALLBACK@ */
+{
+  int		col;			/* Final column */
+  _mxml_streambuf_t	buf;			/* Stream buffer */
+  _mxml_global_t *global = _mxml_global();
+					/* Global data */
+
+
+ /*
+  * Initialize the stream buffer...
+  */
+
+  buf.ctxt    = write_stream_context;
+  buf.write   = write_stream_cb;
+  buf.current = buf.buffer;
+  buf.end     = buf.buffer + sizeof(buf.buffer);
+
+ /*
+  * Write the node...
+  */
+
+  if ((col = mxml_write_node(node, &buf, cb, 0, mxml_stream_putc, global)) < 0)
+    return (-1);
+
+  if (col > 0)
+    if (mxml_stream_putc('\n', &buf) < 0)
+      return (-1);
+
+ /*
+  * Flush and return...
+  */
+
+  return (mxml_stream_write(&buf));
+}
 
 /*
  * 'mxmlSaveString()' - Save an XML node tree to a string.
@@ -944,6 +1046,303 @@ mxml_fd_getc(void *p,			/* I  - File descriptor buffer */
   return (ch);
 }
 
+static int				/* O  - Character or EOF */
+mxml_stream_getc(void *p,			/* I  - File descriptor buffer */
+             int  *encoding)		/* IO - Encoding */
+{
+  _mxml_streambuf_t	*buf;			/* File descriptor buffer */
+  int		ch,			/* Current character */
+		temp;			/* Temporary character */
+
+
+ /*
+  * Grab the next character in the buffer...
+  */
+
+  buf = (_mxml_streambuf_t *)p;
+
+  if (buf->current >= buf->end)
+    if (mxml_stream_read(buf) < 0)
+      return (EOF);
+
+  ch = *(buf->current)++;
+
+  switch (*encoding)
+  {
+    case ENCODE_UTF8 :
+       /*
+	* Got a UTF-8 character; convert UTF-8 to Unicode and return...
+	*/
+
+	if (!(ch & 0x80))
+	{
+#if DEBUG > 1
+          printf("mxml_fd_getc: %c (0x%04x)\n", ch < ' ' ? '.' : ch, ch);
+#endif /* DEBUG > 1 */
+
+	  if (mxml_bad_char(ch))
+	  {
+	    mxml_error("Bad control character 0x%02x not allowed by XML standard!",
+        	       ch);
+	    return (EOF);
+	  }
+
+	  return (ch);
+        }
+	else if (ch == 0xfe)
+	{
+	 /*
+	  * UTF-16 big-endian BOM?
+	  */
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  ch = *(buf->current)++;
+
+	  if (ch != 0xff)
+	    return (EOF);
+
+	  *encoding = ENCODE_UTF16BE;
+
+	  return (mxml_stream_getc(p, encoding));
+	}
+	else if (ch == 0xff)
+	{
+	 /*
+	  * UTF-16 little-endian BOM?
+	  */
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  ch = *(buf->current)++;
+
+	  if (ch != 0xfe)
+	    return (EOF);
+
+	  *encoding = ENCODE_UTF16LE;
+
+	  return (mxml_stream_getc(p, encoding));
+	}
+	else if ((ch & 0xe0) == 0xc0)
+	{
+	 /*
+	  * Two-byte value...
+	  */
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  temp = *(buf->current)++;
+
+	  if ((temp & 0xc0) != 0x80)
+	    return (EOF);
+
+	  ch = ((ch & 0x1f) << 6) | (temp & 0x3f);
+
+	  if (ch < 0x80)
+	  {
+	    mxml_error("Invalid UTF-8 sequence for character 0x%04x!", ch);
+	    return (EOF);
+	  }
+	}
+	else if ((ch & 0xf0) == 0xe0)
+	{
+	 /*
+	  * Three-byte value...
+	  */
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  temp = *(buf->current)++;
+
+	  if ((temp & 0xc0) != 0x80)
+	    return (EOF);
+
+	  ch = ((ch & 0x0f) << 6) | (temp & 0x3f);
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  temp = *(buf->current)++;
+
+	  if ((temp & 0xc0) != 0x80)
+	    return (EOF);
+
+	  ch = (ch << 6) | (temp & 0x3f);
+
+	  if (ch < 0x800)
+	  {
+	    mxml_error("Invalid UTF-8 sequence for character 0x%04x!", ch);
+	    return (EOF);
+	  }
+
+         /*
+	  * Ignore (strip) Byte Order Mark (BOM)...
+	  */
+
+	  if (ch == 0xfeff)
+	    return (mxml_stream_getc(p, encoding));
+	}
+	else if ((ch & 0xf8) == 0xf0)
+	{
+	 /*
+	  * Four-byte value...
+	  */
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  temp = *(buf->current)++;
+
+	  if ((temp & 0xc0) != 0x80)
+	    return (EOF);
+
+	  ch = ((ch & 0x07) << 6) | (temp & 0x3f);
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  temp = *(buf->current)++;
+
+	  if ((temp & 0xc0) != 0x80)
+	    return (EOF);
+
+	  ch = (ch << 6) | (temp & 0x3f);
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  temp = *(buf->current)++;
+
+	  if ((temp & 0xc0) != 0x80)
+	    return (EOF);
+
+	  ch = (ch << 6) | (temp & 0x3f);
+
+	  if (ch < 0x10000)
+	  {
+	    mxml_error("Invalid UTF-8 sequence for character 0x%04x!", ch);
+	    return (EOF);
+	  }
+	}
+	else
+	  return (EOF);
+	break;
+
+    case ENCODE_UTF16BE :
+       /*
+        * Read UTF-16 big-endian char...
+	*/
+
+	if (buf->current >= buf->end)
+	  if (mxml_stream_read(buf) < 0)
+	    return (EOF);
+
+	temp = *(buf->current)++;
+
+	ch = (ch << 8) | temp;
+
+	if (mxml_bad_char(ch))
+	{
+	  mxml_error("Bad control character 0x%02x not allowed by XML standard!",
+        	     ch);
+	  return (EOF);
+	}
+        else if (ch >= 0xd800 && ch <= 0xdbff)
+	{
+	 /*
+	  * Multi-word UTF-16 char...
+	  */
+
+          int lch;
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  lch = *(buf->current)++;
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  temp = *(buf->current)++;
+
+	  lch = (lch << 8) | temp;
+
+          if (lch < 0xdc00 || lch >= 0xdfff)
+	    return (EOF);
+
+          ch = (((ch & 0x3ff) << 10) | (lch & 0x3ff)) + 0x10000;
+	}
+	break;
+
+    case ENCODE_UTF16LE :
+       /*
+        * Read UTF-16 little-endian char...
+	*/
+
+	if (buf->current >= buf->end)
+	  if (mxml_stream_read(buf) < 0)
+	    return (EOF);
+
+	temp = *(buf->current)++;
+
+	ch |= (temp << 8);
+
+        if (mxml_bad_char(ch))
+	{
+	  mxml_error("Bad control character 0x%02x not allowed by XML standard!",
+        	     ch);
+	  return (EOF);
+	}
+        else if (ch >= 0xd800 && ch <= 0xdbff)
+	{
+	 /*
+	  * Multi-word UTF-16 char...
+	  */
+
+          int lch;
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  lch = *(buf->current)++;
+
+	  if (buf->current >= buf->end)
+	    if (mxml_stream_read(buf) < 0)
+	      return (EOF);
+
+	  temp = *(buf->current)++;
+
+	  lch |= (temp << 8);
+
+          if (lch < 0xdc00 || lch >= 0xdfff)
+	    return (EOF);
+
+          ch = (((ch & 0x3ff) << 10) | (lch & 0x3ff)) + 0x10000;
+	}
+	break;
+  }
+
+#if DEBUG > 1
+  printf("mxml_fd_getc: %c (0x%04x)\n", ch < ' ' ? '.' : ch, ch);
+#endif /* DEBUG > 1 */
+
+  return (ch);
+}
 
 /*
  * 'mxml_fd_putc()' - Write a character to a file descriptor.
@@ -1061,6 +1460,101 @@ mxml_fd_write(_mxml_fdbuf_t *buf)	/* I - File descriptor buffer */
   return (0);
 }
 
+static int				/* O - 0 on success, -1 on error */
+mxml_stream_putc(int  ch,			/* I - Character */
+             void *p)			/* I - stream buffer */
+{
+  _mxml_streambuf_t	*buf;			/* stream buffer */
+
+
+ /*
+  * Flush the write buffer as needed...
+  */
+
+  buf = (_mxml_streambuf_t *)p;
+
+  if (buf->current >= buf->end)
+    if (mxml_stream_write(buf) < 0)
+      return (-1);
+
+  *(buf->current)++ = ch;
+
+ /*
+  * Return successfully...
+  */
+
+  return (0);
+}
+
+static int				/* O - 0 on success, -1 on error */
+mxml_stream_read(_mxml_streambuf_t *buf)		/* I - File descriptor buffer */
+{
+  int	bytes;				/* Bytes read... */
+
+
+ /*
+  * Range check input...
+  */
+
+  if (!buf)
+    return (-1);
+
+ /*
+  * Read from the file descriptor...
+  */
+
+  bytes = (int)buf->read(buf->ctxt, buf->buffer, sizeof(buf->buffer));
+
+  if (bytes == 0)
+    return (-1);
+
+ /*
+  * Update the pointers and return success...
+  */
+
+  buf->current = buf->buffer;
+  buf->end     = buf->buffer + bytes;
+
+  return (0);
+}
+
+static int				/* O - 0 on success, -1 on error */
+mxml_stream_write(_mxml_streambuf_t *buf)	/* I - File descriptor buffer */
+{
+  int		bytes;			/* Bytes written */
+  unsigned char	*ptr;			/* Pointer into buffer */
+
+  
+ /*
+  * Range check...
+  */
+
+  if (!buf)
+    return (-1);
+
+ /*
+  * Return 0 if there is nothing to write...
+  */
+
+  if (buf->current == buf->buffer)
+    return (0);
+
+ /*
+  * Loop until we have written everything...
+  */
+
+  for (ptr = buf->buffer; ptr < buf->current; ptr += bytes)
+    if ((bytes = (int)buf->write(buf->ctxt, ptr, buf->current - ptr)) < 0)
+      return (-1);
+
+ /*
+  * All done, reset pointers and return success...
+  */
+
+  buf->current = buf->buffer;
+
+  return (0);
+}
 
 /*
  * 'mxml_file_getc()' - Get a character from a file.
@@ -2069,7 +2563,7 @@ mxml_load_data(
   * Common error return...
   */
 
-  error:
+error:
 
   mxmlDelete(first);
 
@@ -2229,7 +2723,7 @@ mxml_parse_element(
 	  if (mxml_add_char(ch, &ptr, &name, &namesize))
 	    goto error;
 	}
-      }
+    }
     }
 
     *ptr = '\0';
@@ -2381,7 +2875,7 @@ mxml_parse_element(
   * Common error return point...
   */
 
-  error:
+error:
 
   free(name);
   free(value);

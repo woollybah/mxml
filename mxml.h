@@ -117,6 +117,9 @@ typedef const char *(*mxml_save_cb_t)(mxml_node_t *, int);
 typedef void (*mxml_sax_cb_t)(mxml_node_t *, mxml_sax_event_t, void *);
 					/**** SAX callback function ****/
 
+typedef int (*mxml_read_stream_cb_t)(void *,void *,unsigned int);
+
+typedef int (*mxml_write_stream_cb_t)(void *,const void *,unsigned int);
 
 /*
  * C++ support...
@@ -184,6 +187,8 @@ extern mxml_node_t	*mxmlLoadFile(mxml_node_t *top, FILE *fp,
 			              mxml_type_t (*cb)(mxml_node_t *));
 extern mxml_node_t	*mxmlLoadString(mxml_node_t *top, const char *s,
 			                mxml_type_t (*cb)(mxml_node_t *));
+extern mxml_node_t	*mxmlLoadStream(mxml_node_t *top, mxml_read_stream_cb_t read_stream_cb,
+			            void *read_stream_context, mxml_type_t (*cb)(mxml_node_t *));
 extern mxml_node_t	*mxmlNewCDATA(mxml_node_t *parent, const char *string);
 extern mxml_node_t	*mxmlNewCustom(mxml_node_t *parent, void *data,
 			               mxml_custom_destroy_cb_t destroy);
@@ -214,6 +219,8 @@ extern int		mxmlSaveFile(mxml_node_t *node, FILE *fp,
 			             mxml_save_cb_t cb);
 extern int		mxmlSaveString(mxml_node_t *node, char *buffer,
 			               int bufsize, mxml_save_cb_t cb);
+extern int		mxmlSaveStream(mxml_node_t *node, mxml_write_stream_cb_t write_stream_cb,
+			            void *write_stream_context, mxml_save_cb_t cb);
 extern mxml_node_t	*mxmlSAXLoadFd(mxml_node_t *top, int fd,
 			               mxml_type_t (*cb)(mxml_node_t *),
 			               mxml_sax_cb_t sax, void *sax_data);
