@@ -11,6 +11,8 @@
 - The `mxmlSetCDATA`, `mxmlSetElement`, `mxmlSetOpaque`, `mxmlSetOpaquef`,
   `mxmlSetText`, and `mxmlSetTextf` functions caused a use-after-free bug if
   the value came from the same node (Issue #241)
+- The `mxmlSetOpaquef` and `mxmlSetTextf` functions did not work (Issue #244)
+- The `_mxml_strdupf` function did not work on Windows (Issue #245)
 
 
 # Changes in Mini-XML 2.12
